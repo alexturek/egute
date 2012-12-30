@@ -88,15 +88,17 @@ def clamp(min, val, max):
 def mapify(list_of_pairs):
 	return {k:v for k,v in list_of_pairs}
 
+def entirely_contains(superset, subset):
+	return all(item in superset.items() for item in subset.items())
+
 class HierarchyParser(HTMLParser):
-	def __init__(self, tag_stack, catch_multiple=False):
+	def __init__(self, tag_stack, data_bucket):
 		HTMLParser.__init__(self)
 		self._stack_state = -1
 		self._stack = tag_stack
-		self._catch_multiple = catch_multiple
-		self._data = []
 	def handle_starttag(self, tag, attrs):
 		self._stack_state = self._move_stack(tag.lower(), attrs, self._stack_state, self._stack)
+		self._get_frame().handle_starttag(tag,attrs)
 	def handle_data(self, data):
 		if self._ignore_more_data():
 			return
@@ -117,7 +119,6 @@ class HierarchyParser(HTMLParser):
 		"""
 		Return a new state value if the current tag+attrs match where we need to be in our stack
 		"""
-		attrs = mapify(attrs)
 		if state >= len(stack) - 1:
 			return state
 		search_frame = stack[state + 1]
@@ -128,6 +129,45 @@ class HierarchyParser(HTMLParser):
 			return state
 		print("incrementing state to", state+1, search_frame)
 		return state + 1
+
+class DataBucket(object):
+	def handle_starttag(self, tag, attrs):
+		pass
+	def handle_data(self, data):
+		pass
+	def handle_endtag(self, tag):
+		pass
+	def data(self):
+		return []
+
+class TextOnlyBucket(DataBucket):
+	def __init__(self):
+		self._data = []
+	def handle_data(self, data):
+		self._data.append(data)
+	def data(self):
+		return self._data
+
+class StackFrame:
+	def __init__(self, tagname, required_attrs={}, data_bucket=DataBucket()):
+		self._tagname = tagname
+		self._required_attrs = required_attrs
+		self._data_bucket = data_bucket
+		self._depth = 0
+	def handle_starttag(self, tag, attrs):
+		""" return True if this stack frame can handle this tag/attrs, False if you should shift up a frame """
+		attrs = mapify(attrs)
+		attrs_match = entirely_contains(attrs, self._required_attrs)
+		if tag == self._tagname and attrs_match or self._depth > 0:
+			self._depth = self._depth + 1
+			self._data_bucket.handle_starttag(tag, attrs)
+			return True
+		return False
+	def handle_data(self, data):
+		self._data_bucket.handle_data(data)
+	def handle_endtag(self, tag):
+		""" return True if this stack frame can still handle this tag, False if you should shift down a frame """
+		pass
 
 # for m.fanfiction.net
 # <div style='padding:5px 10px 5px 10px;' class='storycontent' id='storycontent' ><p>Disclaimer: J. K. Rowling owns Harry Potter
@@ -190,7 +230,9 @@ if __name__ == "__main__":
 	# tocparser.feed(full_data)
 	# print("TOC:",tocparser.data())
 
-	textparser = HierarchyParser(TEXT_STACK,True)
+	textparser = HierarchyParser(CHAPTERTEXT_STACK,True)
+	textparser.feed(full_data)
+	print("chapter text:",textparser.data())
 	
 
 # ffparser.feed(data)
