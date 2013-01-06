@@ -70,84 +70,93 @@ class FanFictionNetStory:
 		for chapter_index,chapter_title in enumerate(self.htmlparser.table_of_contents()):
 			self._chapters.append(FanFictionNetChapter(chapter_index, chapter_title, self._make_chapter_url(chapter_index)))
 
-class FanFictionHtmlParser(HTMLParser):
-	def __init__(self):
-		HTMLParser.__init__(self)
-	def handle_starttag(self, tag, attrs):
-		print("Encountered a start tag:", tag, attrs)
-	def handle_endtag(self, tag):
-		print("Encountered an end tag :", tag)
-	def handle_data(self, data):
-		print("Encountered some data  :", data)
-	def publisher(self):
-		return "fanfiction.net"
-
 def clamp(min, val, max):
 	return sorted((min, val, max))[1]
 
-def mapify(list_of_pairs):
-	return {k:v for k,v in list_of_pairs}
+def mapify_attrs(attrs):
+	attrs = filter(non_none, attrs)
+	return {k:v.replace("\\'","") for k,v in attrs}
+
+def attrs_to_str(attrs):
+	attrs = mapify_attrs(attrs)
+	if len(attrs) == 0:
+		return ""
+	return " " + ' '.join("=".join((k,'"' + attrs[k] + '"')) for k in attrs)
+
+def non_none(args):
+	return None not in args and None not in set(arg for arg in args)
 
 class HierarchyParser(HTMLParser):
-	def __init__(self, tag_stack, catch_multiple=False):
+	def __init__(self, tag_stack):
 		HTMLParser.__init__(self)
-		self._stack_state = -1
 		self._stack = tag_stack
-		self._catch_multiple = catch_multiple
+		self._capture_state = -1
 		self._data = []
 	def handle_starttag(self, tag, attrs):
-		self._stack_state = self._move_stack(tag.lower(), attrs, self._stack_state, self._stack)
+		self._incr_tag()
+		self._enter_capture_state(tag.lower(), attrs)
+		self._capture_tag(tag, attrs)
+	def handle_endtag(self, tag):
+		self._decr_tag()
+		self._capture_endtag(tag)
+	def _enter_capture_state(self, tag, attrs):
+		if self._capture_state < 0 and self._matches(tag, attrs, self._stack[0]):
+			self._capture_state = 0
+	def _capture_tag(self, tag, attrs):
+		if self._in_tag_capture_frame():
+			if self._handle_special_cases(tag, attrs):
+				return
+			attrs_list = attrs_to_str(attrs)
+			html = ''.join(("<", tag, attrs_list, ">"))
+			self._data.append(html)
+	def _capture_endtag(self, tag):
+		if self._in_tag_capture_frame():
+			html = ''.join(("</", tag, ">"))
+			self._data.append(html)
+	def _handle_special_cases(self, tag, attrs):
+		if tag.lower() == 'br':
+			self._data.append('<br/>')
+			self._decr_tag()
+			return True
+		elif tag.lower() == 'hr':
+			self._data.append(''.join(("<", tag, attrs_to_str(attrs), "/>")))
+			self._decr_tag()
+			return True
+		return False
+	def _incr_tag(self):
+		if self._capture_state >= 0:
+			self._capture_state = self._capture_state + 1
+	def _decr_tag(self):
+		self._capture_state = clamp(-1, self._capture_state - 1, self._capture_state)
+	def _get_capture_frame(self):
+		'''Return None if we aren't in a capture state; otherwise return the current capture frame'''
+		idx = clamp(-1, self._capture_state, len(self._stack) - 1)
+		if idx < 0:
+			return None
+		return self._stack[idx]
 	def handle_data(self, data):
-		if self._ignore_more_data():
-			return
 		if self._in_text_capture_frame():
 			self._data.append(data.strip())
-	def handle_endtag(self, tag):
-		if self._stack_state >= 0 and self._catch_multiple:
-			self._stack_state = self._stack_state - 1
 	def data(self):
 		return self._data
-	def _ignore_more_data(self):
-		return not (len(self._data) == 0 or self._catch_multiple)
 	def _in_text_capture_frame(self):
-		stack_index = clamp(0, self._stack_state, len(self._stack) - 1)
-		closest_frame = self._stack[stack_index]
-		return "CAPTUREDATA" in closest_frame
-	def _move_stack(self, tag, attrs, state, stack):
-		"""
-		Return a new state value if the current tag+attrs match where we need to be in our stack
-		"""
-		attrs = mapify(attrs)
-		if state >= len(stack) - 1:
-			return state
-		search_frame = stack[state + 1]
+		closest_frame = self._get_capture_frame()
+		return None != closest_frame and "CAPTUREDATA" in closest_frame
+	def _in_tag_capture_frame(self):
+		closest_frame = self._get_capture_frame()
+		return None != closest_frame and "CAPTURETAGS" in closest_frame
+	def _matches(self, tag, attrs, search_frame):
+		'''Return True/False if the tag/attrs matches this stack frame'''
+		attrs = mapify_attrs(attrs)
 		if search_frame[0] != tag:
-			return state
+			return False
 		test_attrs = search_frame[1]
 		if not all(item in attrs.items() for item in test_attrs.items()):
-			return state
-		print("incrementing state to", state+1, search_frame)
-		return state + 1
+			return False
+		return True
 
 # for m.fanfiction.net
 # <div style='padding:5px 10px 5px 10px;' class='storycontent' id='storycontent' ><p>Disclaimer: J. K. Rowling owns Harry Potter
-class ChapterTextParser(HTMLParser):
-	def __init__(self):
-		HTMLParser.__init__(self)
-		self._stack = []
-	def tag_starts(tag, attrs):
-		return False
-	def handle_starttag(self, tag, attrs):
-		pass
-	def handle_endtag(self, tag):
-		pass
-	def handle_data(self, data):
-		pass
-	def chaptertext(self):
-		"""
-		Return the body text from the chapter just parsed
-		"""
-		return self._chapter_text
 
 hp_url = 'http://www.fanfiction.net/s/5782108/1/Harry-Potter-and-the-Methods-of-Rationality'
 m_hp_url = hp_url.replace('www.fanfiction.net', 'm.fanfiction.net')
@@ -175,23 +184,24 @@ if __name__ == "__main__":
 		("option",{}, "CAPTUREDATA")
 		]
 	CHAPTERTEXT_STACK = [
-		("div",{"class":"storycontent","id":"storycontent"},"CAPTUREALL")
+		("div",{"class":"storycontent","id":"storycontent"},"CAPTURETAGS","CAPTUREDATA")
 		]
 		
 	titleparser = HierarchyParser(TITLE_STACK)
-	# titleparser.feed(mobile_data)
+	titleparser.feed(mobile_data)
 	# print("Title:",titleparser.data())
 
 	authorparser = HierarchyParser(AUTHOR_STACK)
-	# authorparser.feed(mobile_data)
+	authorparser.feed(mobile_data)
 	# print("Author:",authorparser.data())
 
-	tocparser = HierarchyParser(TOC_STACK,True)
-	# tocparser.feed(full_data)
+	tocparser = HierarchyParser(TOC_STACK)
+	tocparser.feed(full_data)
 	# print("TOC:",tocparser.data())
 
-	textparser = HierarchyParser(TEXT_STACK,True)
-	
+	textparser = HierarchyParser(CHAPTERTEXT_STACK)
+	textparser.feed(mobile_data)
+	# print("text:","".join(textparser.data()))
 
 # ffparser.feed(data)
 
