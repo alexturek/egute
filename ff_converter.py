@@ -1,4 +1,6 @@
 import re
+import sys
+import argparse
 from urllib.request import urlopen
 from urllib.parse import urlparse, urlunparse
 from html.parser import HTMLParser
@@ -33,13 +35,15 @@ class FanFictionNetChapter:
 class FanFictionNetStory:
 	_path_search_regex = "(?P<prefix>/\\w/\\d+)/(?P<chapter>\\d+)/(?P<suffix>.*)"
 	def __init__(self, url):
-		self._original_url = url
 		self._has_cached_data = False
 		self._chapters = []
-		self._url_split = list(urlparse(last))
-		path = self._url_split[2]
-		self._path_parts = re.search(FanfictionNetStory._path_search_regex, lastpath).groupdict()
-		self.htmlparser = FanFictionHtmlParser()
+
+		self._original_url = url.replace('m.fanfiction.net', 'www.fanfiction.net')
+		self._mobile_url = url.replace('www.fanfiction.net', 'm.fanfiction.net')
+
+		parsed = urlparse(self._original_url)
+		self._url_split = list(parsed)
+		self._path_parts = re.search(FanfictionNetStory._path_search_regex, parsed.path).groupdict()
 	def _make_chapter_url(self, chapter_index):
 		newpath = '/'.join([path_parts['prefix'], str(chapter_index), path_parts['suffix']])
 		url_parts = list(self._url_split)
@@ -58,17 +62,27 @@ class FanFictionNetStory:
 		self._verify_cached()
 		return self.htmlparser.author()
 	def publisher(self):
-		self._verify_cached()
-		return self.htmlparser.publisher()
+		return "FanFiction.net"
 	def _verify_cached(self):
 		if self._has_cached_data:	
 			return
 		self._has_cached_data = True
-		resp = urlopen(self._original_url).readall()
-		self.htmlparser.feed(resp)
-		self._story_title = self.htmlparser.story_title()
-		for chapter_index,chapter_title in enumerate(self.htmlparser.table_of_contents()):
-			self._chapters.append(FanFictionNetChapter(chapter_index, chapter_title, self._make_chapter_url(chapter_index)))
+		full_data = urlopen(self._original_url).readall()
+		mobile_data = urlopen(self._mobile_url).readall()
+
+		titleparser = HierarchyParser(TITLE_STACK)
+		titleparser.feed(mobile_data)
+
+		authorparser = HierarchyParser(AUTHOR_STACK)
+		authorparser.feed(mobile_data)
+		# print("Author:",authorparser.data())
+
+		tocparser = HierarchyParser(TOC_STACK)
+		tocparser.feed(full_data)
+		
+		self.author = authorparser.data()[0]
+		self.title = titleparser.data()[0]
+		self.chapters = tocparser.data()
 
 def clamp(min, val, max):
 	return sorted((min, val, max))[1]
@@ -92,6 +106,7 @@ class HierarchyParser(HTMLParser):
 		self._stack = tag_stack
 		self._capture_state = -1
 		self._data = []
+		self._doprint = False
 	def handle_starttag(self, tag, attrs):
 		self._incr_tag()
 		self._enter_capture_state(tag.lower(), attrs)
@@ -104,8 +119,6 @@ class HierarchyParser(HTMLParser):
 			self._capture_state = 0
 	def _capture_tag(self, tag, attrs):
 		if self._in_tag_capture_frame():
-			if self._handle_special_cases(tag, attrs):
-				return
 			attrs_list = attrs_to_str(attrs)
 			html = ''.join(("<", tag, attrs_list, ">"))
 			self._data.append(html)
@@ -113,16 +126,6 @@ class HierarchyParser(HTMLParser):
 		if self._in_tag_capture_frame():
 			html = ''.join(("</", tag, ">"))
 			self._data.append(html)
-	def _handle_special_cases(self, tag, attrs):
-		if tag.lower() == 'br':
-			self._data.append('<br/>')
-			self._decr_tag()
-			return True
-		elif tag.lower() == 'hr':
-			self._data.append(''.join(("<", tag, attrs_to_str(attrs), "/>")))
-			self._decr_tag()
-			return True
-		return False
 	def _incr_tag(self):
 		if self._capture_state >= 0:
 			self._capture_state = self._capture_state + 1
@@ -136,6 +139,7 @@ class HierarchyParser(HTMLParser):
 		return self._stack[idx]
 	def handle_data(self, data):
 		if self._in_text_capture_frame():
+			self._print(self._capture_state * '.',data[:50])
 			self._data.append(data.strip())
 	def data(self):
 		return self._data
@@ -154,6 +158,9 @@ class HierarchyParser(HTMLParser):
 		if not all(item in attrs.items() for item in test_attrs.items()):
 			return False
 		return True
+	def _print(self, *args):
+		if self._doprint:
+			print(*args)
 
 # for m.fanfiction.net
 # <div style='padding:5px 10px 5px 10px;' class='storycontent' id='storycontent' ><p>Disclaimer: J. K. Rowling owns Harry Potter
@@ -161,8 +168,15 @@ class HierarchyParser(HTMLParser):
 hp_url = 'http://www.fanfiction.net/s/5782108/1/Harry-Potter-and-the-Methods-of-Rationality'
 m_hp_url = hp_url.replace('www.fanfiction.net', 'm.fanfiction.net')
 
-mobile_data = str(urlopen(m_hp_url).readall())
-full_data = str(urlopen(hp_url).readall())
+def end_tag(matchobj):
+	# print("ending this tag",matchobj.group(0))
+	return matchobj.group(0).replace('>','/>')
+
+def sanitize(html):
+	return re.sub('\<(hr|br|option)[^/>]*\>',end_tag, html)
+
+mobile_data = sanitize(str(urlopen(m_hp_url).readall()).replace('<br>','<br/>'))
+full_data = sanitize(str(urlopen(hp_url).readall()))
 
 # for m.fanfiction.net:
 # <div id=content><center><b>Harry Potter and the Methods of Rationality</b> by <a href='/u/2269863/'>Less Wrong</a></center>
@@ -170,38 +184,64 @@ full_data = str(urlopen(hp_url).readall())
 # for www.fanfiction.net
 # <SELECT id=chap_select title="Chapter Navigation" Name=chapter onChange="self.location = '/s/5782108/'+ this.options[this.selectedIndex].value + '/Harry-Potter-and-the-Methods-of-Rationality';"><option  value=1 selected>1. A Day of Very Low Probability<option  value=2 >2. Everything I Believe Is False<option  value=3 >3. Comparing Reality To Its Alternatives
 
-if __name__ == "__main__":
-	TITLE_STACK = [
-		("div",{"id":"content"}),
-		("center",{}),
-		("b",{}, "CAPTUREDATA")]
-	AUTHOR_STACK = [
-		("div",{"id":"content"}),
-		("center",{}),
-		("a",{}, "CAPTUREDATA")]
-	TOC_STACK = [
-		("select",{"id":"chap_select"}),
-		("option",{}, "CAPTUREDATA")
-		]
-	CHAPTERTEXT_STACK = [
-		("div",{"class":"storycontent","id":"storycontent"},"CAPTURETAGS","CAPTUREDATA")
-		]
-		
+TITLE_STACK = [
+	("div",{"id":"content"}),
+	("center",{}),
+	("b",{}, "CAPTUREDATA")]
+AUTHOR_STACK = [
+	("div",{"id":"content"}),
+	("center",{}),
+	("a",{}, "CAPTUREDATA")]
+TOC_STACK = [
+	("select",{"id":"chap_select"},"CAPTUREDATA")
+	# ,
+	# ("option",{}, "CAPTUREDATA")
+	]
+CHAPTERTEXT_STACK = [
+	("div",{"class":"storycontent","id":"storycontent"},"CAPTURETAGS","CAPTUREDATA")
+	]
+
+def build_parser():
+	parser = argparse.ArgumentParser(description="Convert a FanFiction.net story to a .mobi file for Kindle.")
+	parser.add_argument('url', metavar='URL', type=str, help="A FanFiction.net story URL")
+	return parser
+
+def what_I_was_doing_before():
 	titleparser = HierarchyParser(TITLE_STACK)
 	titleparser.feed(mobile_data)
-	# print("Title:",titleparser.data())
+	print()
+	print("Title:",titleparser.data()[:10])
+	print()
 
 	authorparser = HierarchyParser(AUTHOR_STACK)
+	# authorparser._doprint = True
 	authorparser.feed(mobile_data)
-	# print("Author:",authorparser.data())
+	print()
+	print("Author:",authorparser.data()[:10])
+	print()
 
 	tocparser = HierarchyParser(TOC_STACK)
+	# tocparser._doprint = True
 	tocparser.feed(full_data)
-	# print("TOC:",tocparser.data())
+	# print("TOC:",sorted(set(tocparser.data())))
+	print()
+	print("Number of chapters:",len(tocparser.data()))
+	print()
 
 	textparser = HierarchyParser(CHAPTERTEXT_STACK)
 	textparser.feed(mobile_data)
-	# print("text:","".join(textparser.data()))
+	print()
+	print("text:","".join(textparser.data())[:10],"......","".join(textparser.data())[-10:])
+	print()
+
+if __name__ == "__main__":
+	# parser = build_parser()
+	# args = parser.parse_args()
+	# url = args.url
+	# if "fanfiction.net" not in url.lower():
+		# print("Error:",url,"not a fanfiction.net url")
+		# parser.exit()
+	what_I_was_doing_before()
 
 # ffparser.feed(data)
 
