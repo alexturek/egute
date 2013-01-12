@@ -100,6 +100,16 @@ def attrs_to_str(attrs):
 def non_none(args):
 	return None not in args and None not in set(arg for arg in args)
 
+def matches(tag, attrs, search_frame):
+	'''Return True if the tag/attrs match a tag/attrs'''
+	attrs = mapify_attrs(attrs)
+	if search_frame[0] != tag:
+		return False
+	test_attrs = search_frame[1]
+	if not all(item in attrs.items() for item in test_attrs.items()):
+		return False
+	return True
+
 class HierarchyParser(HTMLParser):
 	def __init__(self, tag_stack):
 		HTMLParser.__init__(self)
@@ -107,16 +117,21 @@ class HierarchyParser(HTMLParser):
 		self._capture_state = -1
 		self._data = []
 		self._doprint = False
+		self._printcount = 100
+		self._nocapture_levels = 0
 	def handle_starttag(self, tag, attrs):
-		self._incr_tag()
+		self._incr_tag(tag, attrs)
+		if self._nocapture_levels > 0:
+			self._print("no capture:",tag, attrs)
 		self._enter_capture_state(tag.lower(), attrs)
 		self._capture_tag(tag, attrs)
 	def handle_endtag(self, tag):
 		self._decr_tag()
 		self._capture_endtag(tag)
 	def _enter_capture_state(self, tag, attrs):
-		if self._capture_state < 0 and self._matches(tag, attrs, self._stack[0]):
-			self._capture_state = 0
+		if self._capture_state < 0 and matches(tag, attrs, self._stack[0]):
+			self._print("Capturing at",tag,attrs)
+			self._capture_state = self._capture_state + 1
 	def _capture_tag(self, tag, attrs):
 		if self._in_tag_capture_frame():
 			attrs_list = attrs_to_str(attrs)
@@ -126,17 +141,36 @@ class HierarchyParser(HTMLParser):
 		if self._in_tag_capture_frame():
 			html = ''.join(("</", tag, ">"))
 			self._data.append(html)
-	def _incr_tag(self):
-		if self._capture_state >= 0:
+	def _incr_tag(self, tag, attrs):
+		if self._currently_capturing() and matches(tag, attrs, self._closest_frame()):
 			self._capture_state = self._capture_state + 1
+		elif self._capture_state >= 0:
+			self._nocapture_levels = self._nocapture_levels + 1
 	def _decr_tag(self):
-		self._capture_state = clamp(-1, self._capture_state - 1, self._capture_state)
-	def _get_capture_frame(self):
-		'''Return None if we aren't in a capture state; otherwise return the current capture frame'''
+		if self._currently_capturing():
+			self._capture_state = clamp(-1, self._capture_state - 1, self._capture_state)
+		elif self._capture_state >= 0:
+			self._nocapture_levels = self._nocapture_levels - 1
+	def _currently_capturing(self):
+		'''Return True if we're in a potential flag capture state. This is if
+		1. We've found at least one tag that matches the beginning of our stack and
+		2. We haven't started down a node hierarchy that doesn't match our stack.'''
+		found_at_least_one = (self._capture_state >= 0)
+		in_interesting_nodes = (self._nocapture_levels == 0)
+		if found_at_least_one:
+			self._print("in_interesting_nodes:", in_interesting_nodes)
+		return found_at_least_one and in_interesting_nodes
+	def _closest_frame(self):
 		idx = clamp(-1, self._capture_state, len(self._stack) - 1)
 		if idx < 0:
-			return None
+			self._print("Returning empty frame")
+			return ()
 		return self._stack[idx]
+	def _at_capture_frame(self, flag):
+		'''Return True if we're in a frame where we should capture the flag'''
+		if self._capture_state < 0:
+			return False
+		return self._currently_capturing() and flag in self._closest_frame()
 	def handle_data(self, data):
 		if self._in_text_capture_frame():
 			self._print(self._capture_state * '.',data[:50])
@@ -144,22 +178,12 @@ class HierarchyParser(HTMLParser):
 	def data(self):
 		return self._data
 	def _in_text_capture_frame(self):
-		closest_frame = self._get_capture_frame()
-		return None != closest_frame and "CAPTUREDATA" in closest_frame
+		return self._at_capture_frame("CAPTUREDATA")
 	def _in_tag_capture_frame(self):
-		closest_frame = self._get_capture_frame()
-		return None != closest_frame and "CAPTURETAGS" in closest_frame
-	def _matches(self, tag, attrs, search_frame):
-		'''Return True/False if the tag/attrs matches this stack frame'''
-		attrs = mapify_attrs(attrs)
-		if search_frame[0] != tag:
-			return False
-		test_attrs = search_frame[1]
-		if not all(item in attrs.items() for item in test_attrs.items()):
-			return False
-		return True
+		return self._at_capture_frame("CAPTURETAGS")
 	def _print(self, *args):
-		if self._doprint:
+		if self._doprint and self._printcount > 0:
+			self._printcount = self._printcount - 1
 			print(*args)
 
 # for m.fanfiction.net
@@ -169,11 +193,18 @@ hp_url = 'http://www.fanfiction.net/s/5782108/1/Harry-Potter-and-the-Methods-of-
 m_hp_url = hp_url.replace('www.fanfiction.net', 'm.fanfiction.net')
 
 def end_tag(matchobj):
-	# print("ending this tag",matchobj.group(0))
 	return matchobj.group(0).replace('>','/>')
 
+def end_option_tag(matchobj):
+	tagname = matchobj.groupdict()["tag"]
+	attrs_and_cdata = matchobj.groupdict()["attrs_and_cdata"]
+	whole_thing = ''.join(("<",tagname,attrs_and_cdata,"</",tagname,">"))
+	return whole_thing
+
 def sanitize(html):
-	return re.sub('\<(hr|br|option)[^/>]*\>',end_tag, html)
+	html = re.sub('\<(?P<tag>option)(?P<attrs_and_cdata>[^<]+)',end_option_tag, html)
+	html = re.sub('\<(hr|br)[^/>]*\>',end_tag, html)
+	return html
 
 mobile_data = sanitize(str(urlopen(m_hp_url).readall()).replace('<br>','<br/>'))
 full_data = sanitize(str(urlopen(hp_url).readall()))
@@ -187,15 +218,17 @@ full_data = sanitize(str(urlopen(hp_url).readall()))
 TITLE_STACK = [
 	("div",{"id":"content"}),
 	("center",{}),
-	("b",{}, "CAPTUREDATA")]
+	("b",{}, "CAPTUREDATA"),
+	("anything",{})]
 AUTHOR_STACK = [
 	("div",{"id":"content"}),
 	("center",{}),
-	("a",{}, "CAPTUREDATA")]
+	("a",{}, "CAPTUREDATA"),
+	("anything",{})]
 TOC_STACK = [
-	("select",{"id":"chap_select"},"CAPTUREDATA")
-	# ,
-	# ("option",{}, "CAPTUREDATA")
+	("select",{"id":"chap_select"})
+	,
+	("option",{}, "CAPTUREDATA")
 	]
 CHAPTERTEXT_STACK = [
 	("div",{"class":"storycontent","id":"storycontent"},"CAPTURETAGS","CAPTUREDATA")
@@ -208,24 +241,33 @@ def build_parser():
 
 def what_I_was_doing_before():
 	titleparser = HierarchyParser(TITLE_STACK)
+	titleparser._doprint = True
+	titleparser._printcount = 30
 	titleparser.feed(mobile_data)
 	print()
-	print("Title:",titleparser.data()[:10])
+	print("Title:",titleparser.data()[:5],"(",len(titleparser.data()),")")
 	print()
+
+	with open('sanitized.htm','w') as f:
+		f.write(mobile_data)
 
 	authorparser = HierarchyParser(AUTHOR_STACK)
 	# authorparser._doprint = True
+	# authorparser._printcount = 10
 	authorparser.feed(mobile_data)
 	print()
-	print("Author:",authorparser.data()[:10])
+	print("Author:",authorparser.data()[:5],"(",len(authorparser.data()),")")
 	print()
 
 	tocparser = HierarchyParser(TOC_STACK)
 	# tocparser._doprint = True
+	# tocparser._printcount = 50
 	tocparser.feed(full_data)
-	# print("TOC:",sorted(set(tocparser.data())))
+	# with open('sanitized.htm','w') as f:
+		# f.write(full_data)
 	print()
-	print("Number of chapters:",len(tocparser.data()))
+	# print("TOC:",sorted(set(tocparser.data())))
+	print("Number of chapters:",len(set(tocparser.data())))
 	print()
 
 	textparser = HierarchyParser(CHAPTERTEXT_STACK)
