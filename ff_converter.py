@@ -1,239 +1,157 @@
 import re
+import os
+import sys
+import argparse
+import codecs
+import time
+import shutil
 from urllib.request import urlopen
-from urllib.parse import urlparse, urlunparse
-from html.parser import HTMLParser
-from collections import defaultdict
+from bs4 import BeautifulSoup
 
-class FanFictionNetChapter:
-	def __init__(self, number, title, url):
-		self._number = number
-		self._title = title
-		self._url = url
-		self._text = None
-		self._has_cached_data = False
-		self._htmlparser = FanFictionHtmlParser()
-	def htmlparser(self):
-		return self._htmlparser
-	def number(self):
-		return self._number
-	def title(self):
-		return self._title
-	def url(self):
-		return self._url
-	def text(self):
-		self._verify_cached()
-		return self._htmlparser.chaptertext()
-	def _verify_cached(self):
-		if self._has_cached_data:	
-			return
-		self._has_cached_data = True
-		html = urlopen(self._url).readall()
-		self._htmlparser.feed(html)
+# hp_url = 'http://www.fanfiction.net/s/5782108/1/Harry-Potter-and-the-Methods-of-Rationality'
 
-class FanFictionNetStory:
-	_path_search_regex = "(?P<prefix>/\\w/\\d+)/(?P<chapter>\\d+)/(?P<suffix>.*)"
-	def __init__(self, url):
-		self._original_url = url
-		self._has_cached_data = False
-		self._chapters = []
-		self._url_split = list(urlparse(last))
-		path = self._url_split[2]
-		self._path_parts = re.search(FanfictionNetStory._path_search_regex, lastpath).groupdict()
-		self.htmlparser = FanFictionHtmlParser()
-	def _make_chapter_url(self, chapter_index):
-		newpath = '/'.join([path_parts['prefix'], str(chapter_index), path_parts['suffix']])
-		url_parts = list(self._url_split)
-		url_parts[2] = newpath
-		return urlunparse(url_parts)
-	def chapters(self):
-		"""
-		Return a list of FanFictionNetChapter objects, in order
-		"""
-		self._verify_cached()
-		return self._chapters
-	def story_title(self):
-		self._verify_cached()
-		return self.htmlparser.story_title()
-	def author(self):
-		self._verify_cached()
-		return self.htmlparser.author()
-	def publisher(self):
-		self._verify_cached()
-		return self.htmlparser.publisher()
-	def _verify_cached(self):
-		if self._has_cached_data:	
-			return
-		self._has_cached_data = True
-		resp = urlopen(self._original_url).readall()
-		self.htmlparser.feed(resp)
-		self._story_title = self.htmlparser.story_title()
-		for chapter_index,chapter_title in enumerate(self.htmlparser.table_of_contents()):
-			self._chapters.append(FanFictionNetChapter(chapter_index, chapter_title, self._make_chapter_url(chapter_index)))
-
-class FanFictionHtmlParser(HTMLParser):
-	def __init__(self):
-		HTMLParser.__init__(self)
-	def handle_starttag(self, tag, attrs):
-		print("Encountered a start tag:", tag, attrs)
-	def handle_endtag(self, tag):
-		print("Encountered an end tag :", tag)
-	def handle_data(self, data):
-		print("Encountered some data  :", data)
-	def publisher(self):
-		return "fanfiction.net"
-
-def clamp(min, val, max):
-	return sorted((min, val, max))[1]
-
-def mapify(list_of_pairs):
-	return {k:v for k,v in list_of_pairs}
-
-def entirely_contains(superset, subset):
-	return all(item in superset.items() for item in subset.items())
-
-class HierarchyParser(HTMLParser):
-	def __init__(self, tag_stack, data_bucket):
-		HTMLParser.__init__(self)
-		self._stack_state = -1
-		self._stack = tag_stack
-	def handle_starttag(self, tag, attrs):
-		self._stack_state = self._move_stack(tag.lower(), attrs, self._stack_state, self._stack)
-		self._get_frame().handle_starttag(tag,attrs)
-	def handle_data(self, data):
-		if self._ignore_more_data():
-			return
-		if self._in_text_capture_frame():
-			self._data.append(data.strip())
-	def handle_endtag(self, tag):
-		if self._stack_state >= 0 and self._catch_multiple:
-			self._stack_state = self._stack_state - 1
-	def data(self):
-		return self._data
-	def _ignore_more_data(self):
-		return not (len(self._data) == 0 or self._catch_multiple)
-	def _in_text_capture_frame(self):
-		stack_index = clamp(0, self._stack_state, len(self._stack) - 1)
-		closest_frame = self._stack[stack_index]
-		return "CAPTUREDATA" in closest_frame
-	def _move_stack(self, tag, attrs, state, stack):
-		"""
-		Return a new state value if the current tag+attrs match where we need to be in our stack
-		"""
-		if state >= len(stack) - 1:
-			return state
-		search_frame = stack[state + 1]
-		if search_frame[0] != tag:
-			return state
-		test_attrs = search_frame[1]
-		if not all(item in attrs.items() for item in test_attrs.items()):
-			return state
-		print("incrementing state to", state+1, search_frame)
-		return state + 1
-
-class DataBucket(object):
-	def handle_starttag(self, tag, attrs):
-		pass
-	def handle_data(self, data):
-		pass
-	def handle_endtag(self, tag):
-		pass
-	def data(self):
-		return []
-
-class TextOnlyBucket(DataBucket):
-	def __init__(self):
-		self._data = []
-	def handle_data(self, data):
-		self._data.append(data)
-	def data(self):
-		return self._data
-
-class StackFrame:
-	def __init__(self, tagname, required_attrs={}, data_bucket=DataBucket()):
-		self._tagname = tagname
-		self._required_attrs = required_attrs
-		self._data_bucket = data_bucket
-		self._depth = 0
-	def handle_starttag(self, tag, attrs):
-		""" return True if this stack frame can handle this tag/attrs, False if you should shift up a frame """
-		attrs = mapify(attrs)
-		attrs_match = entirely_contains(attrs, self._required_attrs)
-		if tag == self._tagname and attrs_match or self._depth > 0:
-			self._depth = self._depth + 1
-			self._data_bucket.handle_starttag(tag, attrs)
-			return True
-		return False
-	def handle_data(self, data):
-		self._data_bucket.handle_data(data)
-	def handle_endtag(self, tag):
-		""" return True if this stack frame can still handle this tag, False if you should shift down a frame """
-		pass
-
-# for m.fanfiction.net
-# <div style='padding:5px 10px 5px 10px;' class='storycontent' id='storycontent' ><p>Disclaimer: J. K. Rowling owns Harry Potter
-class ChapterTextParser(HTMLParser):
-	def __init__(self):
-		HTMLParser.__init__(self)
-		self._stack = []
-	def tag_starts(tag, attrs):
-		return False
-	def handle_starttag(self, tag, attrs):
-		pass
-	def handle_endtag(self, tag):
-		pass
-	def handle_data(self, data):
-		pass
-	def chaptertext(self):
-		"""
-		Return the body text from the chapter just parsed
-		"""
-		return self._chapter_text
-
-hp_url = 'http://www.fanfiction.net/s/5782108/1/Harry-Potter-and-the-Methods-of-Rationality'
-m_hp_url = hp_url.replace('www.fanfiction.net', 'm.fanfiction.net')
-
-mobile_data = str(urlopen(m_hp_url).readall())
-full_data = str(urlopen(hp_url).readall())
-
-# for m.fanfiction.net:
-# <div id=content><center><b>Harry Potter and the Methods of Rationality</b> by <a href='/u/2269863/'>Less Wrong</a></center>
-
-# for www.fanfiction.net
-# <SELECT id=chap_select title="Chapter Navigation" Name=chapter onChange="self.location = '/s/5782108/'+ this.options[this.selectedIndex].value + '/Harry-Potter-and-the-Methods-of-Rationality';"><option  value=1 selected>1. A Day of Very Low Probability<option  value=2 >2. Everything I Believe Is False<option  value=3 >3. Comparing Reality To Its Alternatives
-
+def write_to_file(filename, text):
+	if len(filename) > 200:
+		raise ValueError("filename")
+	with codecs.open(filename, 'w', 'utf-8-sig') as outputfile:
+		print(text, file=outputfile)
+def read_from_file(filename):
+	with open(filename) as file:
+		return file.read()
+def build_arg_parser():
+   parser = argparse.ArgumentParser(description="Convert a FanFiction.net story to a .mobi file for Kindle.")
+   parser.add_argument('url', metavar='URL', type=str, help="A FanFiction.net story URL")
+   return parser
+def sanitize_chapter_title(title_with_number):
+	return re.match('\d+\.\s+(.+)', title_with_number).groups()[0]
+def get_ff_story_chapter_names(html_content):
+	chapter_numbers = [int(option["value"]) for option in html_content.find(id='chap_select').find_all('option')]
+	chapter_names = [sanitize_chapter_title(option.contents[0]) for option in html_content.find(id='chap_select').find_all('option')]
+	return sorted(zip(chapter_numbers, chapter_names))
+url_regex = "https?://www.fanfiction.net/[^\/]/\\d+/"
+def get_chapter_url(url, chapter_num):
+	return re.search(url_regex, url).group() + str(chapter_num)
+def get_ff_story_chapter_html(html_content):
+	return html_content.find(id="storytext")
+def get_ff_story_title(html):
+	return html.find(id='content_wrapper_inner').table.tr.td.b.string
+def get_ff_story_author(html):
+	return html.find(id='content_wrapper_inner').table.tr.td.a.string
+def get_ff_story_description(html):
+	return html.find(id='content_wrapper_inner').table.tr.td.select('div.xcontrast_txt')[0].string
+def make_chapter_html(chapter_title, chapter_html):
+	html = BeautifulSoup("<html><body><h1 id='chapter_title'/></body></html>")
+	html.find(id='chapter_title').string = chapter_title
+	html.body.append(chapter_html)
+	return html
+def chapter_link(num):
+	return "chapter-{}.html".format(num)
+def make_toc_html(title, author, chapters):
+	html = BeautifulSoup("<html><body><h1 id='title'/><h2 id='author'/></body></html>")
+	html.find(id='title').string = title
+	html.find(id='author').string = author
+	chapter_list = html.new_tag('ol')
+	html.find(id='author').append(chapter_list)
+	for chapter_num, chapter_title in chapters:
+		list_item = html.new_tag("li")
+		link = html.new_tag("a", href=chapter_link(chapter_num))
+		link.string = chapter_title
+		list_item.append(link)
+		chapter_list.append(list_item)
+	return html
+opf_template = read_from_file('book.opf.template')
+def make_book_opf(title, author, chapters, description, publisher):
+	chapter_manifest_list = make_chapter_manifest_list(chapters)
+	spine_refs = make_spine_refs(chapters)
+	guide_refs = make_guide_refs(chapters)
+	return opf_template.format(
+		title=title,
+		author=author,
+		description=description,
+		publisher=publisher,
+		chapter_manifest_list=chapter_manifest_list,
+		spine_refs=spine_refs,
+		guide_refs=guide_refs)
+chapter_manifest_template = '<item id="{id}" href="{url}" media-type="application/xhtml+xml" />'
+def make_chapter_manifest_list(chapters):
+	manifests = []
+	for chapter_num, chapter_title in chapters:
+		url = chapter_link(chapter_num)
+		id = 'c' + str(chapter_num)
+		manifests.append(chapter_manifest_template.format(id=id, url=url))
+	return '\n'.join(manifests)
+spine_ref_template = '<itemref idref="c{chapter_num}" />'
+def make_spine_refs(chapters):
+	return '\n'.join([spine_ref_template.format(chapter_num=chapter_num) for chapter_num, chapter_title in chapters])
+guide_ref_template = '<reference type="text" title="{chapter_title}" href="{url}" />'
+def make_guide_refs(chapters):
+	return '\n'.join([guide_ref_template.format(chapter_title=chapter_title, url=chapter_link(chapter_num)) for chapter_num, chapter_title in chapters])
+ncx_template = read_from_file('toc.ncx.template')
+def make_toc_ncx(title, author, chapters):
+	navmap = make_ncx_navmap(chapters)
+	return ncx_template.format(title=title, author=author, navmap=navmap)
+def make_ncx_navmap(chapters):
+	return make_ncx_toc() + '\n'.join([make_ncx_chapter(number, title) for number,title in chapters])
+def make_ncx_toc():
+	return make_ncx_navpoint(1, "Table of Contents", 'toc.html')
+def make_ncx_chapter(number, title):
+	return make_ncx_navpoint(number+1, title, chapter_link(number))
+def make_ncx_navpoint(number, title, html_name):
+	return '\n'.join((
+		'',
+		'	<navPoint id="navpoint-%d" playOrder="%d">' % (number,number),
+		'		<navLabel>',
+		'			<text>%s</text>' % title,
+		'		</navLabel>',
+		'		<content src="%s"/>' % html_name,
+		'	</navPoint>'))
+def generate_chapter_html_files(tempdir, url, chapters):
+	for number, title in chapters:
+		html = BeautifulSoup(urlopen(get_chapter_url(url, number)))
+		content = get_ff_story_chapter_html(html)
+		chapter_file_name = tempdir + chapter_link(number)
+		chapter_file_html = make_chapter_html(title, content)
+		write_to_file(chapter_file_name, chapter_file_html)
+def make_tempdir():
+	timestamp = str(time.time()).replace('.','')
+	tempdir = os.sep.join((os.getcwd(), "kindletmp_" + str(timestamp), ''))
+	os.makedirs(tempdir)
+	return tempdir
+def delete_dir(tempdir):
+	if tempdir.split(os.sep)[-2].startswith('kindletmp_'):
+		shutil.rmtree(tempdir.replace(os.sep, '/'))
+	else:
+		print("---------------------------------------")
+		print("WARNING: Trying to delete " + tempdir)
+		print("---------------------------------------")
+		sys.exit()
 if __name__ == "__main__":
-	TITLE_STACK = [
-		("div",{"id":"content"}),
-		("center",{}),
-		("b",{}, "CAPTUREDATA")]
-	AUTHOR_STACK = [
-		("div",{"id":"content"}),
-		("center",{}),
-		("a",{}, "CAPTUREDATA")]
-	TOC_STACK = [
-		("select",{"id":"chap_select"}),
-		("option",{}, "CAPTUREDATA")
-		]
-	CHAPTERTEXT_STACK = [
-		("div",{"class":"storycontent","id":"storycontent"},"CAPTUREALL")
-		]
-		
-	titleparser = HierarchyParser(TITLE_STACK)
-	# titleparser.feed(mobile_data)
-	# print("Title:",titleparser.data())
+	parser = build_arg_parser()
+	args = parser.parse_args()
+	url = args.url
+	if "fanfiction.net" not in url.lower():
+		print("Error:",url,"is not a fanfiction.net url")
+		parser.exit()
 
-	authorparser = HierarchyParser(AUTHOR_STACK)
-	# authorparser.feed(mobile_data)
-	# print("Author:",authorparser.data())
+	sample_data = urlopen(url).readall()
+	html = BeautifulSoup(sample_data)
+	chapters = get_ff_story_chapter_names(html)
+	title = get_ff_story_title(html)
+	author = get_ff_story_author(html)
+	description = get_ff_story_description(html)
+	publisher = "FanFiction.net"
 
-	tocparser = HierarchyParser(TOC_STACK,True)
-	# tocparser.feed(full_data)
-	# print("TOC:",tocparser.data())
+	tempdir = make_tempdir()
 
-	textparser = HierarchyParser(CHAPTERTEXT_STACK,True)
-	textparser.feed(full_data)
-	print("chapter text:",textparser.data())
+	generate_chapter_html_files(tempdir, url, chapters)
+	write_to_file(tempdir + 'toc.html', make_toc_html(title, author, chapters))
+	write_to_file(tempdir + 'toc.ncx', make_toc_ncx(title, author, chapters))
+	write_to_file(tempdir + 'book.opf', make_book_opf(title, author, chapters, description, publisher))
+
+	os.system('kindlegen\kindlegen.exe ' + tempdir + 'book.opf -o book.mobi')
+	shutil.copyfile(tempdir + 'book.mobi', 'book.mobi')
 	
+	delete_dir(tempdir)
 
 # ffparser.feed(data)
 
