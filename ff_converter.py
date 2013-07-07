@@ -115,19 +115,22 @@ def generate_chapter_html_files(tempdir, url, chapters):
 		chapter_file_name = tempdir + chapter_link(number)
 		chapter_file_html = make_chapter_html(title, content)
 		write_to_file(chapter_file_name, chapter_file_html)
+tempdir_prefix = ".kindletmp_"
 def make_tempdir():
 	timestamp = str(time.time()).replace('.','')
-	tempdir = os.sep.join((os.getcwd(), "kindletmp_" + str(timestamp), ''))
+	tempdir = os.sep.join((os.getcwd(), tempdir_prefix + str(timestamp), ''))
 	os.makedirs(tempdir)
 	return tempdir
 def delete_dir(tempdir):
-	if tempdir.split(os.sep)[-2].startswith('kindletmp_'):
+	if tempdir.split(os.sep)[-2].startswith(tempdir_prefix):
 		shutil.rmtree(tempdir.replace(os.sep, '/'))
 	else:
 		print("---------------------------------------")
 		print("WARNING: Trying to delete " + tempdir)
 		print("---------------------------------------")
 		sys.exit()
+def filename_from_title(title):
+	return '_'.join(re.findall('[a-zA-Z0-9]+', title))[:50] + ".mobi"
 if __name__ == "__main__":
 	parser = build_arg_parser()
 	args = parser.parse_args()
@@ -151,21 +154,8 @@ if __name__ == "__main__":
 	write_to_file(tempdir + 'toc.ncx', make_toc_ncx(title, author, chapters))
 	write_to_file(tempdir + 'book.opf', make_book_opf(title, author, chapters, description, publisher))
 
-	os.system('kindlegen\kindlegen.exe ' + tempdir + 'book.opf -o book.mobi')
-	shutil.copyfile(tempdir + 'book.mobi', 'book.mobi')
+	book_file_title = filename_from_title(title)
+	os.system('kindlegen\kindlegen.exe ' + tempdir + 'book.opf -o ' + book_file_title)
+	shutil.copyfile(tempdir + book_file_title, book_file_title)
 	
 	delete_dir(tempdir)
-
-# ffparser.feed(data)
-
-# book_outline = make_outline(ff_url)
-# chapter_urls = book_outline.get_chapter_urls()
-# kindle_book = KindleBook(book_outline)
-
-# for chapter_url in chapter_urls:
-	# current_chapter = next_chapter(current_chapter.url())
-	# kindle_chapter = html_to_kindle(current_chapter.html())
-	# kindle_book.add_chapter(kindle_chapter)
-
-# kindle_book.finalize()
-# kindle_book.write(file_name)
