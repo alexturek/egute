@@ -25,7 +25,10 @@ def build_arg_parser():
 def sanitize_chapter_title(title_with_number):
 	return re.match('\d+\.\s+(.+)', title_with_number).groups()[0]
 def get_ff_story_chapter_names(html_content):
-	chapter_numbers = [int(option["value"]) for option in html_content.find(id='chap_select').find_all('option')]
+	chapter_selection = html_content.find(id='chap_select')
+	if chapter_selection == None:
+		return [(1,"The Story")]
+	chapter_numbers = [int(option["value"]) for option in chapter_selection.find_all('option')]
 	chapter_names = [sanitize_chapter_title(option.contents[0]) for option in html_content.find(id='chap_select').find_all('option')]
 	return sorted(zip(chapter_numbers, chapter_names))
 url_regex = "https?://www.fanfiction.net/[^\/]/\\d+/"
